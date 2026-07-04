@@ -95,6 +95,13 @@ Unsupported are called out under "Needs Human Review" at the top of the report:
 venv\Scripts\python.exe src\audit.py data\documents_to_check\github_privacy_policy.md --verify
 ```
 
+Add `--rerank` too to have `audit.py` retrieve rules using the cross-encoder re-ranked retrieval
+(recommended - it's the retrieval mode we proved is more accurate):
+
+```
+venv\Scripts\python.exe src\audit.py data\documents_to_check\github_privacy_policy.md --verify --rerank
+```
+
 Evaluate retrieval quality against a hand-curated gold standard set of questions (pure retrieval,
 no API calls, free to run as often as you like). Runs BOTH baseline and re-ranked retrieval and
 prints a side-by-side comparison - overall Hit Rate @5 and MRR for each, plus a per-question
@@ -102,6 +109,17 @@ breakdown showing which questions were fixed, improved, worsened, or unaffected 
 
 ```
 venv\Scripts\python.exe eval\eval_retrieval.py
+```
+
+Evaluate the self-verification feature across all 4 sample documents at once (makes real Claude
+API calls - documents x checkpoints x 2 calls each; see the cost estimate printed before running
+it, or ask Claude Code for a fresh one). Always uses re-ranked retrieval. Prints and saves an
+aggregate report: overall Verified/Questionable/Unsupported counts, what fraction of findings got
+flagged for human review, a best-effort breakdown of *why* (e.g. citation not grounded in the
+retrieved evidence vs. an overstated explanation), and the same breakdown per document:
+
+```
+venv\Scripts\python.exe eval\eval_verification.py
 ```
 
 No test suite exists yet.
@@ -150,7 +168,9 @@ No test suite exists yet.
   responding in a fixed `STATUS:`/`CITATION:`/`EXPLANATION:` format that gets parsed and grouped
   into a report (Gaps shown first, since they're the most actionable). Sends the whole document
   per checkpoint (not just a keyword-matched excerpt) so judgments aren't skewed by truncation.
-  Reuses `MODEL`/`load_api_key()` from `ask.py` and `get_collection()` from `search.py`.
+  Reuses `MODEL`/`load_api_key()` from `ask.py` and `get_collection()`/`query_rulebooks()` from
+  `search.py` - pass `--rerank` (CLI) or `rerank=True` (to `retrieve_rules()`) to use the more
+  accurate cross-encoder retrieval instead of plain embedding search.
   With `--verify`, each finding is passed - along with the same rule chunks and document text
   used to make it, but NOT the original reasoning process - to a second Claude call
   (`verify_finding()`) whose system prompt explicitly tells it to re-derive its own judgment
@@ -172,3 +192,14 @@ No test suite exists yet.
   MRR comparison plus a per-question table tagging each result FIXED BY RERANK / IMPROVED RANK /
   WORSE RANK / BROKEN BY RERANK / SAME / STILL MISS. Purely local/free - no Claude API calls,
   since it only tests the embedding + cross-encoder + Chroma retrieval step, not generation.
+- `eval/eval_verification.py` — runs the full verified audit (`audit_checkpoint()` +
+  `verify_finding()` from `audit.py`, both reused directly) across every document in
+  `data/documents_to_check/`, always with `rerank=True` retrieval. Collects every finding's
+  verdict across all documents and checkpoints, then reports: overall counts of
+  Verified/Questionable/Unsupported and what fraction got flagged for human review; a best-effort
+  keyword-based categorization of *why* flagged findings were flagged (`categorize_flag_reason()`
+  buckets each into "citation not grounded in retrieved evidence" vs. "overstated/imprecise
+  explanation" vs. "other" - this is a simple heuristic, not a precise classifier); and the same
+  breakdown per document. Prints the summary and saves it to
+  `reports/verification_eval_summary.md`. Makes real Claude API calls (unlike the other `eval/`
+  script) - see the Commands section above for the cost estimate before running it.

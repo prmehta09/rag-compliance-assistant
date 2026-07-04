@@ -14,7 +14,7 @@ from pathlib import Path
 from anthropic import Anthropic
 
 from ask import MODEL, load_api_key
-from search import get_collection
+from search import get_collection, query_rulebooks
 
 DEFAULT_DOCUMENT = "data/documents_to_check/github_privacy_policy.md"
 # Generous cap - Haiku's 200K-token context comfortably fits any of our sample
@@ -124,13 +124,15 @@ def build_document_excerpt(sections: list[str], max_chars: int = MAX_EXCERPT_CHA
     return excerpt.strip()
 
 
-def retrieve_rules(collection, checkpoint: dict, top_k: int = RULES_PER_CHECKPOINT) -> list[dict]:
-    """Find the rule chunks most relevant to one checkpoint."""
-    results = collection.query(query_texts=[checkpoint["query"]], n_results=top_k)
-    return [
-        {"citation": meta["citation"], "law": meta["law"], "text": doc}
-        for doc, meta in zip(results["documents"][0], results["metadatas"][0])
-    ]
+def retrieve_rules(collection, checkpoint: dict, top_k: int = RULES_PER_CHECKPOINT, rerank: bool = False) -> list[dict]:
+    """Find the rule chunks most relevant to one checkpoint.
+
+    Delegates to search.py's shared query_rulebooks() so audit.py benefits
+    from the same free local cross-encoder re-ranking as search.py and the
+    retrieval eval - set rerank=True to fetch a wider candidate pool and
+    re-score it instead of taking Chroma's raw top-k.
+    """
+    return query_rulebooks(collection, checkpoint["query"], top_k=top_k, rerank=rerank)
 
 
 def build_checkpoint_prompt(checkpoint: dict, rule_chunks: list[dict], document_excerpt: str) -> str:
@@ -294,16 +296,17 @@ def save_report(document_path: str, report_text: str) -> Path:
     return out_path
 
 
-def parse_args(argv: list[str]) -> tuple[str, bool]:
-    """Pull out the --verify flag; whatever's left (if anything) is the document path."""
+def parse_args(argv: list[str]) -> tuple[str, bool, bool]:
+    """Pull out the --verify and --rerank flags; whatever's left (if anything) is the document path."""
     verify = "--verify" in argv
-    positional = [a for a in argv if a != "--verify"]
+    rerank = "--rerank" in argv
+    positional = [a for a in argv if a not in ("--verify", "--rerank")]
     doc_path = positional[0] if positional else DEFAULT_DOCUMENT
-    return doc_path, verify
+    return doc_path, verify, rerank
 
 
 def main():
-    doc_path, verify = parse_args(sys.argv[1:])
+    doc_path, verify, rerank = parse_args(sys.argv[1:])
 
     print(f"Step 1/4: Reading and splitting {doc_path}...")
     text = Path(doc_path).read_text(encoding="utf-8")
@@ -318,11 +321,12 @@ def main():
     client = Anthropic(api_key=load_api_key())
 
     verify_note = " (with independent verification)" if verify else ""
-    print(f"\nStep 4/4: Checking {len(CHECKPOINTS)} compliance checkpoints{verify_note}...")
+    rerank_note = " (using re-ranked retrieval)" if rerank else ""
+    print(f"\nStep 4/4: Checking {len(CHECKPOINTS)} compliance checkpoints{verify_note}{rerank_note}...")
     results = []
     for i, checkpoint in enumerate(CHECKPOINTS, start=1):
         print(f"  [{i}/{len(CHECKPOINTS)}] {checkpoint['name']}...")
-        rule_chunks = retrieve_rules(collection, checkpoint)
+        rule_chunks = retrieve_rules(collection, checkpoint, rerank=rerank)
         result = audit_checkpoint(client, checkpoint, rule_chunks, document_excerpt)
         print(f"      -> {result['status']}")
 
