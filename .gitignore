@@ -14,6 +14,7 @@ data/*
 data/rulebooks/*
 data/documents_to_check/*
 data/benchmarks/*
+!data/documents_to_check/README.md
 
 # Keep the per-rulebook README docs visible, ignore the actual legal text.
 !data/rulebooks/gdpr/
