@@ -1,7 +1,9 @@
 """Measures retrieval quality against a hand-curated gold standard set of
-questions (eval/gold_retrieval.json). For each question, runs our normal
-top-k retrieval and checks whether the known-correct rule citation actually
-comes back, computing two standard retrieval metrics:
+questions (eval/gold_retrieval.json), comparing our baseline embedding-only
+retrieval against an optional cross-encoder re-ranking step, side by side.
+
+For each question, runs retrieval and checks whether the known-correct rule
+citation actually comes back, computing two standard retrieval metrics:
 
 - Hit Rate @k: what fraction of questions had the correct rule ANYWHERE in
   the top-k results? (0.0 to 1.0, higher is better)
@@ -9,14 +11,15 @@ comes back, computing two standard retrieval metrics:
   ranked? 1.0 means it was always rank 1 (the very first result); 0.5 means
   it was typically rank 2; 0.0 means it was never found at all.
 
-Pure retrieval - no API calls, no cost, fully local."""
+Pure retrieval - no API calls, no cost, fully local (the re-ranker is a free
+local model too, downloaded once on first use)."""
 
 import json
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
-from search import get_collection  # noqa: E402
+from search import get_collection, query_rulebooks  # noqa: E402
 
 GOLD_SET_PATH = Path(__file__).resolve().parent / "gold_retrieval.json"
 TOP_K = 5
@@ -36,10 +39,10 @@ def find_rank(expected_citations: list[str], retrieved_citations: list[str]) -> 
     return None
 
 
-def evaluate_question(collection, item: dict, k: int = TOP_K) -> dict:
+def evaluate_question(collection, item: dict, k: int, rerank: bool) -> dict:
     """Run retrieval for one gold-set question and score it against the expected citation(s)."""
-    results = collection.query(query_texts=[item["question"]], n_results=k)
-    retrieved_citations = [meta["citation"] for meta in results["metadatas"][0]]
+    candidates = query_rulebooks(collection, item["question"], top_k=k, rerank=rerank)
+    retrieved_citations = [c["citation"] for c in candidates]
 
     rank = find_rank(item["expected_citations"], retrieved_citations)
     return {
@@ -54,26 +57,55 @@ def evaluate_question(collection, item: dict, k: int = TOP_K) -> dict:
     }
 
 
-def print_report(evaluated: list[dict], k: int) -> None:
+def evaluate_gold_set(collection, gold_set: list[dict], k: int, rerank: bool) -> list[dict]:
+    return [evaluate_question(collection, item, k, rerank) for item in gold_set]
+
+
+def compute_metrics(evaluated: list[dict]) -> tuple[float, float]:
+    """Return (hit_rate, mean_reciprocal_rank) for a set of evaluated questions."""
     hit_rate = sum(e["hit"] for e in evaluated) / len(evaluated)
     mrr = sum(e["reciprocal_rank"] for e in evaluated) / len(evaluated)
+    return hit_rate, mrr
 
-    print("=" * 60)
-    print(f"Retrieval Evaluation Summary (k={k}, {len(evaluated)} questions)")
-    print("=" * 60)
-    print(f"Hit Rate @{k}: {hit_rate:.1%}  ({sum(e['hit'] for e in evaluated)}/{len(evaluated)} questions found the right rule)")
-    print(f"Mean Reciprocal Rank (MRR): {mrr:.3f}")
+
+def compare_tag(baseline_item: dict, reranked_item: dict) -> str:
+    """Describe what re-ranking did for one question, compared to baseline."""
+    if reranked_item["hit"] and not baseline_item["hit"]:
+        return "FIXED BY RERANK"
+    if baseline_item["hit"] and not reranked_item["hit"]:
+        return "BROKEN BY RERANK"
+    if baseline_item["hit"] and reranked_item["hit"]:
+        if reranked_item["rank"] < baseline_item["rank"]:
+            return "IMPROVED RANK"
+        if reranked_item["rank"] > baseline_item["rank"]:
+            return "WORSE RANK"
+        return "SAME"
+    return "STILL MISS"
+
+
+def print_comparison(baseline: list[dict], reranked: list[dict], k: int) -> None:
+    b_hit_rate, b_mrr = compute_metrics(baseline)
+    r_hit_rate, r_mrr = compute_metrics(reranked)
+
+    print("=" * 70)
+    print(f"Retrieval Evaluation: Baseline vs Re-ranked (k={k}, {len(baseline)} questions)")
+    print("=" * 70)
+    print(f"{'Metric':<22}{'Baseline':>12}{'Re-ranked':>12}{'Change':>12}")
+    print(f"{'Hit Rate @' + str(k):<22}{b_hit_rate:>12.1%}{r_hit_rate:>12.1%}{(r_hit_rate - b_hit_rate) * 100:>+11.1f}pp")
+    print(f"{'Mean Reciprocal Rank':<22}{b_mrr:>12.3f}{r_mrr:>12.3f}{r_mrr - b_mrr:>+12.3f}")
     print()
 
-    print("Per-question breakdown:")
-    print("-" * 60)
-    for e in evaluated:
-        outcome = f"HIT  (rank {e['rank']})" if e["hit"] else "MISS"
-        print(f"[{e['id']:>2}] {e['law']:<5} {outcome:<14} {e['question']}")
-        print(f"       expected: {', '.join(e['expected_citations'])}")
-        if not e["hit"]:
-            print(f"       got instead: {', '.join(e['retrieved_citations'])}")
-    print("-" * 60)
+    print("Per-question breakdown (baseline -> re-ranked):")
+    print("-" * 70)
+    for b, r in zip(baseline, reranked):
+        b_result = f"rank {b['rank']}" if b["hit"] else "MISS"
+        r_result = f"rank {r['rank']}" if r["hit"] else "MISS"
+        tag = compare_tag(b, r)
+        print(f"[{b['id']:>2}] {b['law']:<5} {b_result:>7} -> {r_result:<7}  {tag:<16} {b['question']}")
+        if not r["hit"]:
+            print(f"       expected: {', '.join(r['expected_citations'])}")
+            print(f"       re-ranked got instead: {', '.join(r['retrieved_citations'])}")
+    print("-" * 70)
 
 
 def main():
@@ -84,10 +116,13 @@ def main():
     print("Loading local embedding model and connecting to Chroma...")
     collection = get_collection()
 
-    print(f"Running retrieval for each question (top-{TOP_K})...\n")
-    evaluated = [evaluate_question(collection, item) for item in gold_set]
+    print(f"Running baseline retrieval (no re-ranking, top-{TOP_K})...")
+    baseline = evaluate_gold_set(collection, gold_set, TOP_K, rerank=False)
 
-    print_report(evaluated, TOP_K)
+    print("Loading local cross-encoder re-ranker (downloads once, ~90MB) and running re-ranked retrieval...\n")
+    reranked = evaluate_gold_set(collection, gold_set, TOP_K, rerank=True)
+
+    print_comparison(baseline, reranked, TOP_K)
 
 
 if __name__ == "__main__":

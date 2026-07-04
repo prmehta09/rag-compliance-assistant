@@ -59,7 +59,14 @@ law, a text snippet, and a similarity score):
 venv\Scripts\python.exe src\search.py "What are the rules about deleting someone's personal data?"
 ```
 
-Or run it with no argument and it will prompt you to type a question.
+Or run it with no argument and it will prompt you to type a question. Add `--rerank` to re-score
+a larger candidate pool with a free local cross-encoder before picking the final top 5 - slower
+per question, but noticeably better at telling apart rules that use similar vocabulary (see
+`src/search.py`'s module docstring). Downloads a ~90MB model on first use, no API calls either way:
+
+```
+venv\Scripts\python.exe src\search.py "What are the rules about deleting someone's personal data?" --rerank
+```
 
 Ask a question and get an answer generated from the retrieved rules, with citations (requires
 `ANTHROPIC_API_KEY` set in a local `.env` file — see `.env.example`):
@@ -89,8 +96,9 @@ venv\Scripts\python.exe src\audit.py data\documents_to_check\github_privacy_poli
 ```
 
 Evaluate retrieval quality against a hand-curated gold standard set of questions (pure retrieval,
-no API calls, free to run as often as you like). Prints Hit Rate @5 and Mean Reciprocal Rank (MRR)
-plus a per-question hit/miss breakdown:
+no API calls, free to run as often as you like). Runs BOTH baseline and re-ranked retrieval and
+prints a side-by-side comparison - overall Hit Rate @5 and MRR for each, plus a per-question
+breakdown showing which questions were fixed, improved, worsened, or unaffected by re-ranking:
 
 ```
 venv\Scripts\python.exe eval\eval_retrieval.py
@@ -117,7 +125,17 @@ No test suite exists yet.
 - `src/search.py` — a manual test tool for the retrieval step: embeds a typed question with the
   same local model, queries Chroma for the top 5 matching chunks, and prints each one's citation,
   law, a text snippet, and a similarity score (converted from Chroma's distance metric). Also
-  exposes `get_collection()`, reused by `ask.py` so both scripts search the same way.
+  exposes `get_collection()` and `query_rulebooks()`, reused by `ask.py`, `audit.py`, and
+  `eval/eval_retrieval.py` so every part of the project searches the rulebooks the same way.
+  `query_rulebooks(..., rerank=True)` adds an optional second stage: instead of taking Chroma's
+  top 5 directly, it fetches a larger pool (`CANDIDATE_POOL_SIZE`, 20) and re-scores each candidate
+  with a free local cross-encoder (`cross-encoder/ms-marco-MiniLM-L-6-v2`, ~90MB, downloaded once)
+  before keeping the best 5. A cross-encoder reads the question and a candidate chunk *together*
+  and outputs one relevance score for that pair, which is slower than our embedding model (which
+  scores each independently) but much better at distinguishing rules with overlapping vocabulary -
+  e.g. HIPAA's administrative/physical/technical safeguards sections, which our baseline eval
+  showed getting confused for one another. Off by default; no behavior changes unless `--rerank`
+  (CLI) or `rerank=True` (code) is passed.
 - `src/ask.py` — the first full retrieval-plus-generation loop (the "R" and "G" of RAG): retrieves
   the top 5 matching rule chunks via `search.py`, then sends the question and those chunks to
   Claude (`claude-haiku-4-5`, loaded from `ANTHROPIC_API_KEY` in `.env` via `python-dotenv`) with a
@@ -148,8 +166,9 @@ No test suite exists yet.
   both GDPR and HIPAA, each with the rule citation(s) that a good retrieval system should surface.
   This is ground truth used to measure retrieval quality, not something to "fix" if scores are low -
   low scores mean the retrieval system needs improving, not the gold set.
-- `eval/eval_retrieval.py` — runs each gold-set question through our normal retrieval (top-5) and
-  checks whether the expected citation actually comes back, reporting Hit Rate @5 (what fraction of
-  questions found the right rule at all) and Mean Reciprocal Rank (how high up it was ranked, on
-  average). Purely local/free - no Claude API calls, since it only tests the embedding + Chroma
-  retrieval step, not generation.
+- `eval/eval_retrieval.py` — runs each gold-set question through `search.py`'s `query_rulebooks()`
+  in both modes (plain embedding retrieval, and with `--rerank`-style cross-encoder re-ranking),
+  checks whether the expected citation comes back in each, and prints a side-by-side Hit Rate @5 /
+  MRR comparison plus a per-question table tagging each result FIXED BY RERANK / IMPROVED RANK /
+  WORSE RANK / BROKEN BY RERANK / SAME / STILL MISS. Purely local/free - no Claude API calls,
+  since it only tests the embedding + cross-encoder + Chroma retrieval step, not generation.
