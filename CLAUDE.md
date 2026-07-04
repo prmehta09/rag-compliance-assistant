@@ -11,10 +11,11 @@ hallucinated citations before showing results to the user.
 
 Tech stack: Python.
 
-The retrieval piece (reading the rulebooks, chunking them, and storing them as searchable
-embeddings) is in place; the rest of the pipeline (matching a document against retrieved rules,
-citation checking, self-verification) still needs to be built. Update the sections below as more
-of the project takes shape.
+The full pipeline is in place end to end: reading the rulebooks into a searchable vector database
+(`src/ingest.py`), retrieval (`src/search.py`), question-answering with citations (`src/ask.py`),
+document auditing against a curated checkpoint list (`src/audit.py`), and an independent
+self-verification pass on top of the audit findings (`src/audit.py --verify`). Update the sections
+below as more of the project takes shape (e.g. a richer report format, a UI, more checkpoints).
 
 ## Working rules
 
@@ -78,6 +79,15 @@ venv\Scripts\python.exe src\audit.py data\documents_to_check\github_privacy_poli
 
 Or run it with no argument and it defaults to auditing the GitHub sample privacy policy.
 
+Add `--verify` to also run each finding through a second, independent Claude call that tries to
+poke holes in it (catches over-stated findings, wrong citations, or claims the document/rules
+don't actually support). Doubles the number of API calls. Findings flagged Questionable or
+Unsupported are called out under "Needs Human Review" at the top of the report:
+
+```
+venv\Scripts\python.exe src\audit.py data\documents_to_check\github_privacy_policy.md --verify
+```
+
 No test suite exists yet.
 
 ## Architecture
@@ -114,7 +124,15 @@ No test suite exists yet.
   responding in a fixed `STATUS:`/`CITATION:`/`EXPLANATION:` format that gets parsed and grouped
   into a report (Gaps shown first, since they're the most actionable). Sends the whole document
   per checkpoint (not just a keyword-matched excerpt) so judgments aren't skewed by truncation.
-  Reuses `MODEL`/`load_api_key()` from `ask.py` and `get_collection()` from `search.py`. Still no
-  self-verification pass on top of this — that's a separate, later step.
+  Reuses `MODEL`/`load_api_key()` from `ask.py` and `get_collection()` from `search.py`.
+  With `--verify`, each finding is passed - along with the same rule chunks and document text
+  used to make it, but NOT the original reasoning process - to a second Claude call
+  (`verify_finding()`) whose system prompt explicitly tells it to re-derive its own judgment
+  independently rather than assume the first finding is correct, and to mark it Unsupported if the
+  cited rule doesn't say what was claimed or the document doesn't support the stated status, or
+  Questionable if something's imprecise or overstated. Verdicts are shown alongside each finding,
+  and anything Questionable/Unsupported is surfaced in a "Needs Human Review" summary at the top of
+  the report — this is the project's self-verification step, aimed at catching hallucinated or
+  overstated findings before a human trusts them.
 - `reports/` — audit reports saved by `audit.py`. Ignored by git (regenerable by re-running the
   audit); don't hand-edit it.

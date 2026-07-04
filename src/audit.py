@@ -1,7 +1,12 @@
 """Audits a document (e.g. a privacy policy) against a curated list of GDPR/HIPAA
 compliance checkpoints. For each checkpoint, it retrieves the relevant rule(s)
 from our Chroma database and asks Claude to judge whether the document
-adequately addresses that obligation, citing the exact rule it relied on."""
+adequately addresses that obligation, citing the exact rule it relied on.
+
+With --verify, each finding is then checked by a second, independent Claude
+call whose only job is to try to poke holes in the first finding - catching
+citations that don't say what was claimed, or statuses the document text
+doesn't actually support."""
 
 import sys
 from pathlib import Path
@@ -150,9 +155,8 @@ def parse_checkpoint_response(text: str) -> dict:
     return {"status": status, "citation": citation, "explanation": explanation}
 
 
-def audit_checkpoint(client: Anthropic, collection, checkpoint: dict, document_excerpt: str) -> dict:
-    """Retrieve rules for one checkpoint and ask Claude to judge the document against it."""
-    rule_chunks = retrieve_rules(collection, checkpoint)
+def audit_checkpoint(client: Anthropic, checkpoint: dict, rule_chunks: list[dict], document_excerpt: str) -> dict:
+    """Ask Claude to judge the document against one checkpoint, given the already-retrieved rules."""
     prompt = build_checkpoint_prompt(checkpoint, rule_chunks, document_excerpt)
     response = client.messages.create(
         model=MODEL,
@@ -166,13 +170,104 @@ def audit_checkpoint(client: Anthropic, collection, checkpoint: dict, document_e
     return result
 
 
+VERIFY_SYSTEM_PROMPT = """You are an independent compliance reviewer double-checking someone else's \
+finding for accuracy. Your job is to catch mistakes, not to rubber-stamp the original conclusion.
+
+You will be given a compliance checkpoint, the rule excerpt(s) the original finding relied on, the \
+document text that was audited, and the original finding (its status, cited rule, and explanation).
+
+Independently re-examine the rule excerpts and the document text yourself, as if you were making the \
+finding fresh - do not simply assume the original finding is right. Then compare your own conclusion \
+to the original finding.
+
+Mark the finding UNSUPPORTED if either is true:
+- The cited rule excerpt does not actually say what the explanation claims it says.
+- The document text does not actually support the stated status (e.g. the finding says "Addressed" but \
+the document doesn't really cover it, or says "Gap" but the document does address it elsewhere in the \
+text you were given).
+
+Mark it QUESTIONABLE if the overall conclusion is roughly right but something is off - an imprecise or \
+partially wrong citation, an overstated or understated explanation, or reasoning not fully grounded in \
+the text you were given.
+
+Otherwise mark it VERIFIED.
+
+Respond in EXACTLY this format and nothing else:
+
+VERDICT: <Verified | Questionable | Unsupported>
+CONFIDENCE: <High | Medium | Low>
+REASON: <one or two plain-language sentences explaining your verdict>"""
+
+
+def build_verification_prompt(checkpoint: dict, finding: dict, rule_chunks: list[dict], document_excerpt: str) -> str:
+    rules_block = "\n\n".join(f"[{c['law']} - {c['citation']}]\n{c['text']}" for c in rule_chunks)
+    return (
+        f"Compliance checkpoint: {checkpoint['name']}\n\n"
+        f"Relevant rule excerpts:\n\n{rules_block}\n\n"
+        f"Document text that was audited:\n\n{document_excerpt}\n\n"
+        f"Original finding to check:\n"
+        f"STATUS: {finding['status']}\n"
+        f"CITATION: {finding['citation']}\n"
+        f"EXPLANATION: {finding['explanation']}"
+    )
+
+
+def parse_verification_response(text: str) -> dict:
+    """Pull the VERDICT/CONFIDENCE/REASON lines out of Claude's reply."""
+    verdict, confidence, reason = "Unparsed", "", text.strip()
+    for line in text.splitlines():
+        if line.startswith("VERDICT:"):
+            verdict = line.split(":", 1)[1].strip()
+        elif line.startswith("CONFIDENCE:"):
+            confidence = line.split(":", 1)[1].strip()
+        elif line.startswith("REASON:"):
+            reason = line.split(":", 1)[1].strip()
+    return {"verdict": verdict, "confidence": confidence, "reason": reason}
+
+
+# Verdicts that mean a human should take a second look before trusting the finding.
+FLAGGED_VERDICTS = {"Questionable", "Unsupported"}
+
+
+def verify_finding(client: Anthropic, checkpoint: dict, finding: dict, rule_chunks: list[dict], document_excerpt: str) -> dict:
+    """Run a second, independent Claude call whose only job is to try to poke holes in `finding`."""
+    prompt = build_verification_prompt(checkpoint, finding, rule_chunks, document_excerpt)
+    response = client.messages.create(
+        model=MODEL,
+        max_tokens=MAX_TOKENS,
+        system=VERIFY_SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    answer_text = next(block.text for block in response.content if block.type == "text")
+    return parse_verification_response(answer_text)
+
+
 # Ordered so the most actionable findings (gaps) appear first in the report.
 STATUS_ORDER = ["Gap", "Partially Addressed", "Addressed", "Not Applicable"]
 
 
-def build_report(document_path: str, results: list[dict]) -> str:
-    """Format all checkpoint results into one readable report, grouped by status."""
+def build_report(document_path: str, results: list[dict], verified: bool = False) -> str:
+    """Format all checkpoint results into one readable report, grouped by status.
+
+    When `verified` is True, each result also carries a "verification" dict, and
+    a summary section calling out anything flagged for human review is added
+    at the top so those findings aren't buried in the full list.
+    """
     lines = ["# Compliance Audit Report", "", f"Document: {document_path}", ""]
+
+    if verified:
+        flagged = [r for r in results if r["verification"]["verdict"] in FLAGGED_VERDICTS]
+        lines.append(f"## Needs Human Review ({len(flagged)})")
+        lines.append("")
+        if flagged:
+            for r in flagged:
+                v = r["verification"]
+                lines.append(f"- **{r['checkpoint']}** — original status: {r['status']}, "
+                              f"verifier says: {v['verdict']} (confidence: {v['confidence']}) — {v['reason']}")
+        else:
+            lines.append("None - the verifier agreed with every finding below.")
+        lines.append("")
+
     for status in STATUS_ORDER:
         matching = [r for r in results if r["status"] == status]
         if not matching:
@@ -183,6 +278,10 @@ def build_report(document_path: str, results: list[dict]) -> str:
             lines.append(f"### {r['checkpoint']}")
             lines.append(f"- Citation: {r['citation']}")
             lines.append(f"- Explanation: {r['explanation']}")
+            if verified:
+                v = r["verification"]
+                flag = " [NEEDS HUMAN REVIEW]" if v["verdict"] in FLAGGED_VERDICTS else ""
+                lines.append(f"- Verification: {v['verdict']} (confidence: {v['confidence']}){flag} — {v['reason']}")
             lines.append("")
     return "\n".join(lines)
 
@@ -195,8 +294,16 @@ def save_report(document_path: str, report_text: str) -> Path:
     return out_path
 
 
+def parse_args(argv: list[str]) -> tuple[str, bool]:
+    """Pull out the --verify flag; whatever's left (if anything) is the document path."""
+    verify = "--verify" in argv
+    positional = [a for a in argv if a != "--verify"]
+    doc_path = positional[0] if positional else DEFAULT_DOCUMENT
+    return doc_path, verify
+
+
 def main():
-    doc_path = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_DOCUMENT
+    doc_path, verify = parse_args(sys.argv[1:])
 
     print(f"Step 1/4: Reading and splitting {doc_path}...")
     text = Path(doc_path).read_text(encoding="utf-8")
@@ -210,16 +317,25 @@ def main():
     print("\nStep 3/4: Loading Anthropic client...")
     client = Anthropic(api_key=load_api_key())
 
-    print(f"\nStep 4/4: Checking {len(CHECKPOINTS)} compliance checkpoints...")
+    verify_note = " (with independent verification)" if verify else ""
+    print(f"\nStep 4/4: Checking {len(CHECKPOINTS)} compliance checkpoints{verify_note}...")
     results = []
     for i, checkpoint in enumerate(CHECKPOINTS, start=1):
         print(f"  [{i}/{len(CHECKPOINTS)}] {checkpoint['name']}...")
-        result = audit_checkpoint(client, collection, checkpoint, document_excerpt)
+        rule_chunks = retrieve_rules(collection, checkpoint)
+        result = audit_checkpoint(client, checkpoint, rule_chunks, document_excerpt)
         print(f"      -> {result['status']}")
+
+        if verify:
+            verification = verify_finding(client, checkpoint, result, rule_chunks, document_excerpt)
+            result["verification"] = verification
+            flag = " [NEEDS HUMAN REVIEW]" if verification["verdict"] in FLAGGED_VERDICTS else ""
+            print(f"      -> verifier: {verification['verdict']}{flag}")
+
         results.append(result)
 
     print()
-    report_text = build_report(doc_path, results)
+    report_text = build_report(doc_path, results, verified=verify)
     print(report_text)
 
     report_path = save_report(doc_path, report_text)
