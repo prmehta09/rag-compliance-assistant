@@ -14,3 +14,11 @@ data/*
 data/rulebooks/*
 data/documents_to_check/*
 data/benchmarks/*
+
+# Keep the per-rulebook README docs visible, ignore the actual legal text.
+!data/rulebooks/gdpr/
+!data/rulebooks/hipaa/
+data/rulebooks/gdpr/*
+!data/rulebooks/gdpr/README.md
+data/rulebooks/hipaa/*
+!data/rulebooks/hipaa/README.md
