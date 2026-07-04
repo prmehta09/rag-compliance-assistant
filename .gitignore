@@ -2,3 +2,15 @@
 *.env
 venv/
 __pycache__/
+
+# Data files can be large (datasets, cloned benchmarks, legal texts).
+# Ignore everything under data/ by default, but keep the folder structure
+# and README visible to anyone who clones the repo.
+data/*
+!data/README.md
+!data/rulebooks/
+!data/documents_to_check/
+!data/benchmarks/
+data/rulebooks/*
+data/documents_to_check/*
+data/benchmarks/*
