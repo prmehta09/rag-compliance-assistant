@@ -122,6 +122,17 @@ retrieved evidence vs. an overstated explanation), and the same breakdown per do
 venv\Scripts\python.exe eval\eval_verification.py
 ```
 
+Launch the web app (a friendly page for picking a sample document and either viewing its saved
+audit report for free, or running a brand-new live audit with our best setup):
+
+```
+venv\Scripts\streamlit.exe run app.py
+```
+
+This opens the app in your browser (usually at `http://localhost:8501`). "View saved report" mode
+is instant and free; "Run live audit" makes real Claude API calls and shows a cost estimate before
+you click the button.
+
 No test suite exists yet.
 
 ## Architecture
@@ -203,3 +214,16 @@ No test suite exists yet.
   breakdown per document. Prints the summary and saves it to
   `reports/verification_eval_summary.md`. Makes real Claude API calls (unlike the other `eval/`
   script) - see the Commands section above for the cost estimate before running it.
+- `app.py` — the Streamlit web UI. Two modes, chosen with a radio button: "View saved report"
+  parses a previously-saved Markdown report from `reports/` back into structured data
+  (`parse_audit_report()`) and displays it for free/instantly - no models loaded, no API calls;
+  "Run live audit" reuses `audit.py`'s own functions directly (`retrieve_rules(..., rerank=True)`,
+  `audit_checkpoint`, `verify_finding`, `build_report`, `save_report`) behind a button, so it's the
+  exact same audit logic as the CLI, just driven from a click instead of `sys.argv`, and it always
+  uses our best setup (re-ranked retrieval + verification). Results are cached in
+  `st.session_state` (so they survive Streamlit's automatic reruns on every interaction) and the
+  embedding model / Chroma connection / Anthropic client are wrapped in `@st.cache_resource` so
+  they're loaded once per session, not on every rerun. Findings are shown as color-coded cards
+  (🔴 Gap / 🟡 Partially Addressed / 🟢 Addressed / ⚪ Not Applicable) with a separate
+  ✅/⚠️/❌ verification badge, a summary metrics row, and a "Needs Human Review" section
+  highlighting anything the verifier flagged.
