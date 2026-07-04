@@ -69,6 +69,15 @@ venv\Scripts\python.exe src\ask.py "Can a patient get a copy of their medical re
 
 Or run it with no argument and it will prompt you to type a question.
 
+Audit a document against a curated list of GDPR/HIPAA compliance checkpoints, printing a grouped
+report and saving a copy to `reports/<document-name>_audit.md` (also requires `ANTHROPIC_API_KEY`):
+
+```
+venv\Scripts\python.exe src\audit.py data\documents_to_check\github_privacy_policy.md
+```
+
+Or run it with no argument and it defaults to auditing the GitHub sample privacy policy.
+
 No test suite exists yet.
 
 ## Architecture
@@ -98,3 +107,14 @@ No test suite exists yet.
   citing the exact rule for every claim, and saying so if the rules don't contain the answer.
   Prints the answer plus the list of source citations it was given. No self-verification step yet —
   that's still to be built, and is the next planned step in the project overview above.
+- `src/audit.py` — the core "audit a document" feature. For each entry in its `CHECKPOINTS` list
+  (a curated, easily-extendable set of GDPR/HIPAA obligations - right to access, erasure, breach
+  notification, security safeguards, etc.), it retrieves the matching rule chunks via
+  `search.py`, then asks Claude to judge whether the document text addresses that obligation,
+  responding in a fixed `STATUS:`/`CITATION:`/`EXPLANATION:` format that gets parsed and grouped
+  into a report (Gaps shown first, since they're the most actionable). Sends the whole document
+  per checkpoint (not just a keyword-matched excerpt) so judgments aren't skewed by truncation.
+  Reuses `MODEL`/`load_api_key()` from `ask.py` and `get_collection()` from `search.py`. Still no
+  self-verification pass on top of this — that's a separate, later step.
+- `reports/` — audit reports saved by `audit.py`. Ignored by git (regenerable by re-running the
+  audit); don't hand-edit it.
