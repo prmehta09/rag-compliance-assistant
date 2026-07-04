@@ -88,6 +88,14 @@ Unsupported are called out under "Needs Human Review" at the top of the report:
 venv\Scripts\python.exe src\audit.py data\documents_to_check\github_privacy_policy.md --verify
 ```
 
+Evaluate retrieval quality against a hand-curated gold standard set of questions (pure retrieval,
+no API calls, free to run as often as you like). Prints Hit Rate @5 and Mean Reciprocal Rank (MRR)
+plus a per-question hit/miss breakdown:
+
+```
+venv\Scripts\python.exe eval\eval_retrieval.py
+```
+
 No test suite exists yet.
 
 ## Architecture
@@ -115,8 +123,8 @@ No test suite exists yet.
   Claude (`claude-haiku-4-5`, loaded from `ANTHROPIC_API_KEY` in `.env` via `python-dotenv`) with a
   system prompt that restricts it to answering only from the provided rules, in plain language,
   citing the exact rule for every claim, and saying so if the rules don't contain the answer.
-  Prints the answer plus the list of source citations it was given. No self-verification step yet —
-  that's still to be built, and is the next planned step in the project overview above.
+  Prints the answer plus the list of source citations it was given. `ask.py` itself has no
+  self-verification step (that lives in `audit.py`, described below).
 - `src/audit.py` — the core "audit a document" feature. For each entry in its `CHECKPOINTS` list
   (a curated, easily-extendable set of GDPR/HIPAA obligations - right to access, erasure, breach
   notification, security safeguards, etc.), it retrieves the matching rule chunks via
@@ -136,3 +144,12 @@ No test suite exists yet.
   overstated findings before a human trusts them.
 - `reports/` — audit reports saved by `audit.py`. Ignored by git (regenerable by re-running the
   audit); don't hand-edit it.
+- `eval/gold_retrieval.json` — a hand-curated (not AI-generated) set of ~19 test questions spanning
+  both GDPR and HIPAA, each with the rule citation(s) that a good retrieval system should surface.
+  This is ground truth used to measure retrieval quality, not something to "fix" if scores are low -
+  low scores mean the retrieval system needs improving, not the gold set.
+- `eval/eval_retrieval.py` — runs each gold-set question through our normal retrieval (top-5) and
+  checks whether the expected citation actually comes back, reporting Hit Rate @5 (what fraction of
+  questions found the right rule at all) and Mean Reciprocal Rank (how high up it was ranked, on
+  average). Purely local/free - no Claude API calls, since it only tests the embedding + Chroma
+  retrieval step, not generation.
