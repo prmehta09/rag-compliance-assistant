@@ -11,10 +11,10 @@ hallucinated citations before showing results to the user.
 
 Tech stack: Python.
 
-The repository is currently empty (no code has been written yet), so this file will need to be
-expanded with real commands and architecture notes as the project takes shape. Whoever (human or
-Claude) adds the first real module, test runner, or dependency file should update the sections
-below rather than leaving them as placeholders.
+The retrieval piece (reading the rulebooks, chunking them, and storing them as searchable
+embeddings) is in place; the rest of the pipeline (matching a document against retrieved rules,
+citation checking, self-verification) still needs to be built. Update the sections below as more
+of the project takes shape.
 
 ## Working rules
 
@@ -32,12 +32,52 @@ below rather than leaving them as placeholders.
 
 ## Commands
 
-No build, lint, or test commands exist yet since the codebase is empty. Once dependencies and a
-test framework are set up (e.g. `pip install -r requirements.txt`, `pytest`), record the actual
-commands here, including how to run a single test.
+Set up the virtual environment and install dependencies (only needed once, or after
+`requirements.txt` changes):
+
+```
+python -m venv venv
+venv\Scripts\activate
+pip install -r requirements.txt
+```
+
+Run the ingestion pipeline (reads `data/rulebooks/gdpr/` and `data/rulebooks/hipaa/`, chunks
+them, embeds them locally, and stores them in `./chroma_db`):
+
+```
+venv\Scripts\python.exe src\ingest.py
+```
+
+Re-running `ingest.py` is safe — it deletes and rebuilds the collection each time instead of
+duplicating chunks.
+
+Search the rulebooks from the command line (prints the top 5 matching chunks with citation,
+law, a text snippet, and a similarity score):
+
+```
+venv\Scripts\python.exe src\search.py "What are the rules about deleting someone's personal data?"
+```
+
+Or run it with no argument and it will prompt you to type a question.
+
+No test suite exists yet.
 
 ## Architecture
 
-Not yet established. Once the project has real structure (e.g. document ingestion, retrieval
-pipeline, compliance rule store, citation checker, self-verification pass), document the
-high-level data flow here so future sessions don't have to re-derive it by reading every file.
+- `data/rulebooks/gdpr/` and `data/rulebooks/hipaa/` — the source legal text, one file per
+  article (GDPR) or section (HIPAA). See each folder's `README.md` for where the text came from.
+- `src/ingest.py` — turns those files into a searchable vector database:
+  1. Reads every rule file and strips off the header lines (title/citation/source), keeping just
+     the legal text.
+  2. Splits that text into overlapping chunks (~800 characters, ~150 character overlap) so long
+     articles/sections are still searchable in reasonably small pieces.
+  3. Embeds each chunk locally with the free `sentence-transformers` model `all-MiniLM-L6-v2` (no
+     API key, runs on your own machine).
+  4. Stores the chunks, their embeddings, and metadata (`law`, `citation`, `source_file`,
+     `chunk_index`) in a local Chroma database at `./chroma_db`, so a later retrieval step can
+     look up the best-matching rule and cite exactly where it came from.
+- `./chroma_db/` — the persisted vector database. Ignored by git (regenerable by re-running
+  `ingest.py`); don't hand-edit it.
+- `src/search.py` — a manual test tool for the retrieval step: embeds a typed question with the
+  same local model, queries Chroma for the top 5 matching chunks, and prints each one's citation,
+  law, a text snippet, and a similarity score (converted from Chroma's distance metric).
