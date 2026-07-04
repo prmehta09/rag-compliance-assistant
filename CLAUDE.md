@@ -60,6 +60,15 @@ venv\Scripts\python.exe src\search.py "What are the rules about deleting someone
 
 Or run it with no argument and it will prompt you to type a question.
 
+Ask a question and get an answer generated from the retrieved rules, with citations (requires
+`ANTHROPIC_API_KEY` set in a local `.env` file — see `.env.example`):
+
+```
+venv\Scripts\python.exe src\ask.py "Can a patient get a copy of their medical records?"
+```
+
+Or run it with no argument and it will prompt you to type a question.
+
 No test suite exists yet.
 
 ## Architecture
@@ -80,4 +89,12 @@ No test suite exists yet.
   `ingest.py`); don't hand-edit it.
 - `src/search.py` — a manual test tool for the retrieval step: embeds a typed question with the
   same local model, queries Chroma for the top 5 matching chunks, and prints each one's citation,
-  law, a text snippet, and a similarity score (converted from Chroma's distance metric).
+  law, a text snippet, and a similarity score (converted from Chroma's distance metric). Also
+  exposes `get_collection()`, reused by `ask.py` so both scripts search the same way.
+- `src/ask.py` — the first full retrieval-plus-generation loop (the "R" and "G" of RAG): retrieves
+  the top 5 matching rule chunks via `search.py`, then sends the question and those chunks to
+  Claude (`claude-haiku-4-5`, loaded from `ANTHROPIC_API_KEY` in `.env` via `python-dotenv`) with a
+  system prompt that restricts it to answering only from the provided rules, in plain language,
+  citing the exact rule for every claim, and saying so if the rules don't contain the answer.
+  Prints the answer plus the list of source citations it was given. No self-verification step yet —
+  that's still to be built, and is the next planned step in the project overview above.

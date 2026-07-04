@@ -30,6 +30,15 @@ def distance_to_similarity(distance: float) -> float:
     return 1 - (distance / 2)
 
 
+def get_collection():
+    """Connect to the local Chroma database using the same embedding model
+    that was used to build it. Reused by ask.py so both scripts search
+    the rulebooks the exact same way."""
+    embedding_fn = embedding_functions.SentenceTransformerEmbeddingFunction(model_name=EMBEDDING_MODEL)
+    client = chromadb.PersistentClient(path=CHROMA_DIR)
+    return client.get_collection(name=COLLECTION_NAME, embedding_function=embedding_fn)
+
+
 def print_results(question: str, results: dict) -> None:
     documents = results["documents"][0]
     metadatas = results["metadatas"][0]
@@ -53,12 +62,8 @@ def main():
         print("No question given, exiting.")
         return
 
-    print(f"Loading local embedding model '{EMBEDDING_MODEL}'...")
-    embedding_fn = embedding_functions.SentenceTransformerEmbeddingFunction(model_name=EMBEDDING_MODEL)
-
-    print(f"Connecting to Chroma database at {CHROMA_DIR}...")
-    client = chromadb.PersistentClient(path=CHROMA_DIR)
-    collection = client.get_collection(name=COLLECTION_NAME, embedding_function=embedding_fn)
+    print(f"Loading local embedding model '{EMBEDDING_MODEL}' and connecting to {CHROMA_DIR}...")
+    collection = get_collection()
 
     results = collection.query(query_texts=[question], n_results=TOP_K)
     print_results(question, results)
