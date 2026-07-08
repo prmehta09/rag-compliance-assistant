@@ -57,6 +57,7 @@ app = FastAPI(title="Veritas Compliance Audit API", lifespan=lifespan)
 # Allow the local frontend dev servers to call this API from the browser.
 ALLOWED_ORIGINS = [
     "http://localhost:5183",  # landing/ (Vite dev server)
+    "http://localhost:5173",  # landing/ (Vite default port)
     "http://localhost:3000",  # generic local React/Next dev server
     # TODO: add your deployed Vercel URL here once you have one, e.g.
     # "https://veritas.vercel.app",

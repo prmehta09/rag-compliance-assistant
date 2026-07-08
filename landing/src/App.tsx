@@ -1,5 +1,6 @@
 import { Navbar } from "./components/Navbar";
 import { Hero } from "./components/Hero";
+import { Results } from "./components/Results";
 import { SpotlightScene } from "./components/SpotlightScene";
 
 function App() {
@@ -8,6 +9,7 @@ function App() {
       <SpotlightScene />
       <Navbar />
       <Hero />
+      <Results />
     </main>
   );
 }
