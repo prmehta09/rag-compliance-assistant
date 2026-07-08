@@ -18,8 +18,10 @@ from pathlib import Path
 from anthropic import Anthropic
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
+
+from report_pdf import markdown_to_pdf_bytes
 
 # audit.py lives in src/ and imports its sibling modules (ask.py, search.py)
 # as plain top-level imports - e.g. `from search import get_collection` -
@@ -31,7 +33,7 @@ from pydantic import BaseModel
 SRC_DIR = Path(__file__).resolve().parent / "src"
 sys.path.insert(0, str(SRC_DIR))
 
-from audit import CHECKPOINTS, run_audit, run_audit_stream  # noqa: E402  (import after sys.path setup, on purpose)
+from audit import CHECKPOINTS, build_report, run_audit, run_audit_stream  # noqa: E402  (import after sys.path setup, on purpose)
 from search import get_collection  # noqa: E402
 from ask import load_api_key  # noqa: E402
 
@@ -189,4 +191,45 @@ def audit_document_stream(request: AuditRequest):
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
         },
+    )
+
+
+def _infer_verified(findings: list[FindingModel]) -> bool:
+    """build_report() treats verification as all-or-nothing across a single
+    audit's findings (run_audit()/run_audit_stream() either set it on every
+    finding or none), so checking the first one - once we know there is
+    one - tells us how the whole list was produced."""
+    if not findings:
+        return False
+    return findings[0].verification is not None
+
+
+def _report_markdown(request: AuditResponse) -> str:
+    """Rebuilds the exact report build_report() would have produced for this
+    audit, straight from the already-computed findings the client sends back
+    - no re-auditing, no new Claude/Chroma calls."""
+    results = [finding.model_dump() for finding in request.findings]
+    return build_report(request.document, results, verified=_infer_verified(request.findings))
+
+
+@app.post("/report/markdown")
+def report_markdown(request: AuditResponse):
+    report_text = _report_markdown(request)
+    filename = f"{Path(request.document).stem}_audit.md"
+    return Response(
+        content=report_text,
+        media_type="text/markdown",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.post("/report/pdf")
+def report_pdf(request: AuditResponse):
+    report_text = _report_markdown(request)
+    pdf_bytes = markdown_to_pdf_bytes(report_text)
+    filename = f"{Path(request.document).stem}_audit.pdf"
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
