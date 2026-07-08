@@ -244,6 +244,46 @@ def verify_finding(client: Anthropic, checkpoint: dict, finding: dict, rule_chun
     return parse_verification_response(answer_text)
 
 
+def _audit_checkpoints(checkpoints, document_excerpt, collection, client, verify, rerank):
+    """Shared per-checkpoint work: for each checkpoint, retrieve_rules() ->
+    audit_checkpoint() -> (if verify) verify_finding(), yielding each finding
+    the moment it's ready.
+
+    This is the ONE place the audit loop is written. run_audit() collects
+    everything this yields into a list before returning (unchanged batch
+    behavior); run_audit_stream() yields straight through so a caller can
+    react to each finding as it completes. Neither duplicates this logic.
+    """
+    for checkpoint in checkpoints:
+        rule_chunks = retrieve_rules(collection, checkpoint, rerank=rerank)
+        result = audit_checkpoint(client, checkpoint, rule_chunks, document_excerpt)
+
+        if verify:
+            verification = verify_finding(client, checkpoint, result, rule_chunks, document_excerpt)
+            result["verification"] = verification
+            result["flagged"] = verification["verdict"] in FLAGGED_VERDICTS
+        else:
+            result["flagged"] = False
+
+        yield result
+
+
+def _prepare_audit(document_path: str, collection, client):
+    """Shared setup for run_audit() and run_audit_stream(): read/split the
+    document and resolve a collection/client (building fresh ones - the
+    original behavior - only if the caller didn't supply their own)."""
+    text = Path(document_path).read_text(encoding="utf-8")
+    sections = split_into_sections(text)
+    document_excerpt = build_document_excerpt(sections)
+
+    if collection is None:
+        collection = get_collection()
+    if client is None:
+        client = Anthropic(api_key=load_api_key())
+
+    return document_excerpt, collection, client
+
+
 def run_audit(document_path: str, verify: bool = True, rerank: bool = False, collection=None, client=None) -> dict:
     """Run the complete audit workflow and return structured results (prints nothing).
 
@@ -258,30 +298,24 @@ def run_audit(document_path: str, verify: bool = True, rerank: bool = False, col
     per request. Leave both as None (the default) to get the original
     behavior - build a fresh collection/client for this call.
     """
-    text = Path(document_path).read_text(encoding="utf-8")
-    sections = split_into_sections(text)
-    document_excerpt = build_document_excerpt(sections)
-
-    if collection is None:
-        collection = get_collection()
-    if client is None:
-        client = Anthropic(api_key=load_api_key())
-
-    findings = []
-    for checkpoint in CHECKPOINTS:
-        rule_chunks = retrieve_rules(collection, checkpoint, rerank=rerank)
-        result = audit_checkpoint(client, checkpoint, rule_chunks, document_excerpt)
-
-        if verify:
-            verification = verify_finding(client, checkpoint, result, rule_chunks, document_excerpt)
-            result["verification"] = verification
-            result["flagged"] = verification["verdict"] in FLAGGED_VERDICTS
-        else:
-            result["flagged"] = False
-
-        findings.append(result)
-
+    document_excerpt, collection, client = _prepare_audit(document_path, collection, client)
+    findings = list(_audit_checkpoints(CHECKPOINTS, document_excerpt, collection, client, verify, rerank))
     return {"document": document_path, "findings": findings}
+
+
+def run_audit_stream(document_path: str, verify: bool = True, rerank: bool = True, collection=None, client=None):
+    """Generator version of run_audit(): the exact same per-checkpoint flow
+    (via the shared _audit_checkpoints() helper - no audit logic is
+    duplicated or altered), but YIELDS each finding as soon as that
+    checkpoint is done instead of collecting them all and returning once at
+    the end. Meant for a streaming caller (e.g. an SSE API endpoint) that
+    wants to show findings arriving one at a time.
+
+    `collection` and `client` work exactly as in run_audit() - pass in
+    resources built once at startup to avoid rebuilding them per call.
+    """
+    document_excerpt, collection, client = _prepare_audit(document_path, collection, client)
+    yield from _audit_checkpoints(CHECKPOINTS, document_excerpt, collection, client, verify, rerank)
 
 
 # Ordered so the most actionable findings (gaps) appear first in the report.
