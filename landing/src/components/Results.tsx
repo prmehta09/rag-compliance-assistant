@@ -10,10 +10,25 @@ const DOCUMENT_LABELS: Record<string, string> = {
   "ebay_privacy_policy.md": "eBay",
   "mozilla_privacy_policy.md": "Mozilla",
   "teladoc_privacy_policy.md": "Teladoc",
+  "amazon_privacy_policy.md": "Amazon",
+  "airbnb_privacy_policy.md": "Airbnb",
+  "spotify_privacy_policy.md": "Spotify",
+  "linkedin_privacy_policy.md": "LinkedIn",
+  "netflix_privacy_policy.md": "Netflix",
 };
 
 function labelFor(filename: string): string {
-  return DOCUMENT_LABELS[filename] ?? filename.replace(/\.md$/i, "").replace(/_/g, " ");
+  if (DOCUMENT_LABELS[filename]) return DOCUMENT_LABELS[filename];
+
+  // Fallback for any future file with no explicit mapping: title-case the
+  // name with "_privacy_policy.md" (or just ".md") stripped off.
+  const stem = filename.replace(/_privacy_policy\.md$/i, "").replace(/\.md$/i, "");
+  return stem
+    .replace(/[_-]+/g, " ")
+    .trim()
+    .split(" ")
+    .map((word) => (word ? word[0].toUpperCase() + word.slice(1) : word))
+    .join(" ");
 }
 
 const EMPTY_COUNTS: Record<FindingStatus, number> = {
