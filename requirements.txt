@@ -4,3 +4,5 @@ anthropic==0.116.0
 python-dotenv==1.2.2
 streamlit==1.58.0
 plotly==6.8.0
+fastapi==0.139.0
+uvicorn==0.50.0

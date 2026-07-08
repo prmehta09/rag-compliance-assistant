@@ -244,6 +244,46 @@ def verify_finding(client: Anthropic, checkpoint: dict, finding: dict, rule_chun
     return parse_verification_response(answer_text)
 
 
+def run_audit(document_path: str, verify: bool = True, rerank: bool = False, collection=None, client=None) -> dict:
+    """Run the complete audit workflow and return structured results (prints nothing).
+
+    For each checkpoint: retrieve_rules() -> audit_checkpoint() -> (if verify)
+    verify_finding() - the exact same functions and call order main() has always
+    used, just gathered into one importable call instead of a script. This is
+    what a future API layer (or any other caller) should import and use.
+
+    `collection` and `client` are optional so a long-lived caller (e.g. a web
+    server) can build them once at startup and pass them in on every call,
+    instead of reconnecting to Chroma and re-authenticating with Anthropic
+    per request. Leave both as None (the default) to get the original
+    behavior - build a fresh collection/client for this call.
+    """
+    text = Path(document_path).read_text(encoding="utf-8")
+    sections = split_into_sections(text)
+    document_excerpt = build_document_excerpt(sections)
+
+    if collection is None:
+        collection = get_collection()
+    if client is None:
+        client = Anthropic(api_key=load_api_key())
+
+    findings = []
+    for checkpoint in CHECKPOINTS:
+        rule_chunks = retrieve_rules(collection, checkpoint, rerank=rerank)
+        result = audit_checkpoint(client, checkpoint, rule_chunks, document_excerpt)
+
+        if verify:
+            verification = verify_finding(client, checkpoint, result, rule_chunks, document_excerpt)
+            result["verification"] = verification
+            result["flagged"] = verification["verdict"] in FLAGGED_VERDICTS
+        else:
+            result["flagged"] = False
+
+        findings.append(result)
+
+    return {"document": document_path, "findings": findings}
+
+
 # Ordered so the most actionable findings (gaps) appear first in the report.
 STATUS_ORDER = ["Gap", "Partially Addressed", "Addressed", "Not Applicable"]
 
@@ -308,6 +348,9 @@ def parse_args(argv: list[str]) -> tuple[str, bool, bool]:
 def main():
     doc_path, verify, rerank = parse_args(sys.argv[1:])
 
+    # Re-derive the section/character counts for this status line only - cheap,
+    # pure text processing (no API calls), so it can't drift from what
+    # run_audit() computes internally from the same file.
     print(f"Step 1/4: Reading and splitting {doc_path}...")
     text = Path(doc_path).read_text(encoding="utf-8")
     sections = split_into_sections(text)
@@ -315,28 +358,22 @@ def main():
     print(f"  Document has {len(sections)} sections; using {len(document_excerpt)} characters for judgment.")
 
     print("\nStep 2/4: Loading local embedding model and connecting to Chroma...")
-    collection = get_collection()
-
     print("\nStep 3/4: Loading Anthropic client...")
-    client = Anthropic(api_key=load_api_key())
 
     verify_note = " (with independent verification)" if verify else ""
     rerank_note = " (using re-ranked retrieval)" if rerank else ""
     print(f"\nStep 4/4: Checking {len(CHECKPOINTS)} compliance checkpoints{verify_note}{rerank_note}...")
-    results = []
-    for i, checkpoint in enumerate(CHECKPOINTS, start=1):
-        print(f"  [{i}/{len(CHECKPOINTS)}] {checkpoint['name']}...")
-        rule_chunks = retrieve_rules(collection, checkpoint, rerank=rerank)
-        result = audit_checkpoint(client, checkpoint, rule_chunks, document_excerpt)
+
+    audit_result = run_audit(doc_path, verify=verify, rerank=rerank)
+    results = audit_result["findings"]
+
+    for i, result in enumerate(results, start=1):
+        print(f"  [{i}/{len(CHECKPOINTS)}] {result['checkpoint']}...")
         print(f"      -> {result['status']}")
-
         if verify:
-            verification = verify_finding(client, checkpoint, result, rule_chunks, document_excerpt)
-            result["verification"] = verification
-            flag = " [NEEDS HUMAN REVIEW]" if verification["verdict"] in FLAGGED_VERDICTS else ""
+            verification = result["verification"]
+            flag = " [NEEDS HUMAN REVIEW]" if result["flagged"] else ""
             print(f"      -> verifier: {verification['verdict']}{flag}")
-
-        results.append(result)
 
     print()
     report_text = build_report(doc_path, results, verified=verify)
