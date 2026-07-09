@@ -3,7 +3,14 @@ import { AlertTriangle, ChevronDown } from "lucide-react";
 import { PrimaryButton } from "./Button";
 import { SummaryBar } from "./SummaryBar";
 import { FindingCard } from "./FindingCard";
-import { auditStream, getDocuments, type Finding, type FindingStatus } from "../lib/api";
+import {
+  auditStream,
+  downloadReportMarkdown,
+  downloadReportPdf,
+  getDocuments,
+  type Finding,
+  type FindingStatus,
+} from "../lib/api";
 
 const DOCUMENT_LABELS: Record<string, string> = {
   "github_privacy_policy.md": "GitHub",
@@ -53,6 +60,9 @@ export function Results() {
   const [totalCheckpoints, setTotalCheckpoints] = useState(0);
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const [downloading, setDownloading] = useState<"markdown" | "pdf" | null>(null);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
 
   const cancelRef = useRef<(() => void) | null>(null);
 
@@ -111,6 +121,28 @@ export function Results() {
       },
     );
     cancelRef.current = cancel;
+  }
+
+  async function handleDownload(format: "markdown" | "pdf") {
+    if (downloading || findings.length === 0) return;
+
+    setDownloadError(null);
+    setDownloading(format);
+    try {
+      // selectedDocument is the bare filename from the dropdown (e.g.
+      // "mozilla_privacy_policy.md") - NOT a full path - and findings is
+      // whatever's already in state from the last completed stream, so this
+      // never re-runs the audit.
+      if (format === "pdf") {
+        await downloadReportPdf(selectedDocument, findings);
+      } else {
+        await downloadReportMarkdown(selectedDocument, findings);
+      }
+    } catch (err) {
+      setDownloadError(err instanceof Error ? err.message : "Download failed.");
+    } finally {
+      setDownloading(null);
+    }
   }
 
   const showSummary = (running || findings.length > 0) && !error;
@@ -190,6 +222,29 @@ export function Results() {
             />
           </div>
         )}
+
+        {!running && findings.length > 0 && (
+          <div className="mt-4 flex gap-3">
+            <button
+              type="button"
+              onClick={() => handleDownload("markdown")}
+              disabled={downloading !== null}
+              className="border border-white px-4 py-2 text-sm text-paper disabled:opacity-50"
+            >
+              {downloading === "markdown" ? "Downloading…" : "Download Markdown"}
+            </button>
+            <button
+              type="button"
+              onClick={() => handleDownload("pdf")}
+              disabled={downloading !== null}
+              className="border border-white px-4 py-2 text-sm text-paper disabled:opacity-50"
+            >
+              {downloading === "pdf" ? "Downloading…" : "Download PDF"}
+            </button>
+          </div>
+        )}
+
+        {downloadError && <p className="mt-2 text-sm text-amber-400">{downloadError}</p>}
 
         {findings.length > 0 && (
           <ul className="mt-6 grid grid-cols-1 gap-4 lg:grid-cols-2">

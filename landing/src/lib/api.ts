@@ -152,3 +152,57 @@ export function auditStream(
 
   return { cancel: () => controller.abort() };
 }
+
+/** Turns a fetch Response's body into a real browser file download. */
+async function triggerBlobDownload(response: Response, filename: string): Promise<void> {
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+/**
+ * Shared by downloadReportMarkdown/downloadReportPdf: POSTs the findings
+ * already sitting in the caller's state to a /report/* endpoint (no
+ * re-audit) and saves the response as a file. `documentName` must be the
+ * bare filename (e.g. "mozilla_privacy_policy.md", the same value the
+ * document dropdown uses) - NOT a full path, since it becomes the report's
+ * "Document:" line and the downloaded filename.
+ */
+async function downloadReport(
+  path: "/report/markdown" | "/report/pdf",
+  extension: "md" | "pdf",
+  documentName: string,
+  findings: Finding[],
+): Promise<void> {
+  let response: Response;
+  try {
+    response = await fetch(`${API_URL}${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ document: documentName, findings }),
+    });
+  } catch {
+    throw new Error(`Couldn't reach the audit server at ${API_URL}. Is it running?`);
+  }
+
+  if (!response.ok) {
+    throw new Error(await readErrorDetail(response));
+  }
+
+  const stem = documentName.replace(/\.md$/i, "");
+  await triggerBlobDownload(response, `${stem}_audit.${extension}`);
+}
+
+export function downloadReportMarkdown(documentName: string, findings: Finding[]): Promise<void> {
+  return downloadReport("/report/markdown", "md", documentName, findings);
+}
+
+export function downloadReportPdf(documentName: string, findings: Finding[]): Promise<void> {
+  return downloadReport("/report/pdf", "pdf", documentName, findings);
+}
