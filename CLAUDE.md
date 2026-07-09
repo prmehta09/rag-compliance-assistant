@@ -43,7 +43,8 @@ pip install -r requirements.txt
 ```
 
 Run the ingestion pipeline (reads `data/rulebooks/gdpr/` and `data/rulebooks/hipaa/`, chunks
-them, embeds them locally, and stores them in `./chroma_db`):
+them, embeds them via Voyage AI's hosted embedding API (`voyage-3.5-lite`), and stores them in
+`./chroma_db`):
 
 ```
 venv\Scripts\python.exe src\ingest.py

@@ -11,10 +11,10 @@ export function MetricsCard() {
         </span>
       </div>
       <p className="mt-3 font-serif text-3xl italic text-paper">
-        57.9% <span className="not-italic text-paper-faint">→</span> 78.9%
+        84.2% <span className="not-italic text-paper-faint">→</span> 89.5%
       </p>
       <p className="mt-1.5 text-xs leading-relaxed text-paper-dim">
-        Hit Rate@5 · cross-encoder re-ranking
+        Hit Rate@5 · Voyage AI retrieval, baseline → re-ranked
       </p>
 
       <div className="my-5 h-px bg-void-line" />
