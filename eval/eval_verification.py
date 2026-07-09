@@ -150,7 +150,7 @@ def main():
         print(f"Excluding: {', '.join(excludes)}")
     print(f"Found {len(documents)} documents to audit: {', '.join(d.name for d in documents)}\n")
 
-    print("Loading local embedding model, cross-encoder re-ranker, and connecting to Chroma...")
+    print("Connecting to Chroma (embedding/re-ranking happens via Voyage AI per-request)...")
     collection = get_collection()
 
     print("Loading Anthropic client...\n")

@@ -9,7 +9,7 @@ import os
 from anthropic import Anthropic
 from dotenv import load_dotenv
 
-from search import TOP_K, get_collection, get_question
+from search import TOP_K, get_collection, get_question, query_rulebooks
 
 MODEL = "claude-haiku-4-5"  # fast, cheap model - plenty for answering from a handful of short rule chunks
 MAX_TOKENS = 1024
@@ -24,13 +24,14 @@ Rules you must follow:
 
 
 def retrieve_chunks(question: str) -> list[dict]:
-    """Find the top matching rule chunks for a question using our existing Chroma search."""
+    """Find the top matching rule chunks for a question using our existing Chroma search.
+
+    Delegates to search.py's query_rulebooks() (embedding via Voyage AI under
+    the hood - see voyage_client.py) instead of querying Chroma directly, so
+    there's only one place that knows how to embed a question."""
     collection = get_collection()
-    results = collection.query(query_texts=[question], n_results=TOP_K)
-    chunks = []
-    for doc, meta in zip(results["documents"][0], results["metadatas"][0]):
-        chunks.append({"citation": meta["citation"], "law": meta["law"], "text": doc})
-    return chunks
+    results = query_rulebooks(collection, question, top_k=TOP_K)
+    return [{"citation": c["citation"], "law": c["law"], "text": c["text"]} for c in results]
 
 
 def build_user_message(question: str, chunks: list[dict]) -> str:

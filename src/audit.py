@@ -128,9 +128,9 @@ def retrieve_rules(collection, checkpoint: dict, top_k: int = RULES_PER_CHECKPOI
     """Find the rule chunks most relevant to one checkpoint.
 
     Delegates to search.py's shared query_rulebooks() so audit.py benefits
-    from the same free local cross-encoder re-ranking as search.py and the
-    retrieval eval - set rerank=True to fetch a wider candidate pool and
-    re-score it instead of taking Chroma's raw top-k.
+    from the same Voyage AI re-ranking as search.py and the retrieval eval -
+    set rerank=True to fetch a wider candidate pool and re-score it instead
+    of taking Chroma's raw top-k.
     """
     return query_rulebooks(collection, checkpoint["query"], top_k=top_k, rerank=rerank)
 

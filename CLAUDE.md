@@ -60,16 +60,16 @@ venv\Scripts\python.exe src\search.py "What are the rules about deleting someone
 ```
 
 Or run it with no argument and it will prompt you to type a question. Add `--rerank` to re-score
-a larger candidate pool with a free local cross-encoder before picking the final top 5 - slower
-per question, but noticeably better at telling apart rules that use similar vocabulary (see
-`src/search.py`'s module docstring). Downloads a ~90MB model on first use, no API calls either way:
+a larger candidate pool with Voyage AI's hosted re-ranker before picking the final top 5 - slower
+per question (a network call), but noticeably better at telling apart rules that use similar
+vocabulary (see `src/search.py`'s module docstring). Requires `VOYAGE_API_KEY` in `.env`:
 
 ```
 venv\Scripts\python.exe src\search.py "What are the rules about deleting someone's personal data?" --rerank
 ```
 
 Ask a question and get an answer generated from the retrieved rules, with citations (requires
-`ANTHROPIC_API_KEY` set in a local `.env` file — see `.env.example`):
+`ANTHROPIC_API_KEY` and `VOYAGE_API_KEY` set in a local `.env` file — see `.env.example`):
 
 ```
 venv\Scripts\python.exe src\ask.py "Can a patient get a copy of their medical records?"
@@ -103,7 +103,8 @@ venv\Scripts\python.exe src\audit.py data\documents_to_check\github_privacy_poli
 ```
 
 Evaluate retrieval quality against a hand-curated gold standard set of questions (pure retrieval,
-no API calls, free to run as often as you like). Runs BOTH baseline and re-ranked retrieval and
+no Claude calls - embedding/re-ranking go through Voyage AI, free at this project's scale). Runs
+BOTH baseline and re-ranked retrieval and
 prints a side-by-side comparison - overall Hit Rate @5 and MRR for each, plus a per-question
 breakdown showing which questions were fixed, improved, worsened, or unaffected by re-ranking:
 
@@ -139,32 +140,47 @@ No test suite exists yet.
 
 - `data/rulebooks/gdpr/` and `data/rulebooks/hipaa/` — the source legal text, one file per
   article (GDPR) or section (HIPAA). See each folder's `README.md` for where the text came from.
+- `src/voyage_client.py` — thin wrapper around Voyage AI's REST API (called directly with
+  `requests`, not the official `voyageai` SDK - that SDK pulls in `langchain-core`/`langsmith`/
+  `tokenizers` as transitive dependencies, measured at ~400MB extra RAM just to import, which
+  would defeat the point of moving off local models). Exposes `embed_texts()` and `rerank()`,
+  both used by `ingest.py` and `search.py` below. Requires `VOYAGE_API_KEY` in `.env`. Retries
+  automatically on HTTP 429 (rate limit) with backoff - unverified/no-payment-method Voyage
+  accounts are throttled to 3 requests/min and 10K tokens/min, so hitting one is expected, not
+  a bug; only non-429 errors propagate immediately.
 - `src/ingest.py` — turns those files into a searchable vector database:
   1. Reads every rule file and strips off the header lines (title/citation/source), keeping just
      the legal text.
   2. Splits that text into overlapping chunks (~800 characters, ~150 character overlap) so long
      articles/sections are still searchable in reasonably small pieces.
-  3. Embeds each chunk locally with the free `sentence-transformers` model `all-MiniLM-L6-v2` (no
-     API key, runs on your own machine).
+  3. Embeds each chunk via Voyage AI's hosted embedding API (`voyage-3.5-lite`, `input_type=
+     "document"`) - see `src/voyage_client.py`. This used to run a local `sentence-transformers`
+     model instead; that moved to a hosted API specifically so the deployed process doesn't need
+     `torch` in memory (a local embedding model + cross-encoder together measured well over
+     Render's free-tier 512MB RAM limit).
   4. Stores the chunks, their embeddings, and metadata (`law`, `citation`, `source_file`,
-     `chunk_index`) in a local Chroma database at `./chroma_db`, so a later retrieval step can
-     look up the best-matching rule and cite exactly where it came from.
+     `chunk_index`) in a local Chroma database at `./chroma_db`, configured for cosine distance
+     (`hnsw:space: "cosine"`) so similarity scoring is exact regardless of whether Voyage's
+     vectors happen to be unit-length, so a later retrieval step can look up the best-matching
+     rule and cite exactly where it came from.
 - `./chroma_db/` — the persisted vector database. Ignored by git (regenerable by re-running
-  `ingest.py`); don't hand-edit it.
-- `src/search.py` — a manual test tool for the retrieval step: embeds a typed question with the
-  same local model, queries Chroma for the top 5 matching chunks, and prints each one's citation,
-  law, a text snippet, and a similarity score (converted from Chroma's distance metric). Also
-  exposes `get_collection()` and `query_rulebooks()`, reused by `ask.py`, `audit.py`, and
-  `eval/eval_retrieval.py` so every part of the project searches the rulebooks the same way.
-  `query_rulebooks(..., rerank=True)` adds an optional second stage: instead of taking Chroma's
-  top 5 directly, it fetches a larger pool (`CANDIDATE_POOL_SIZE`, 20) and re-scores each candidate
-  with a free local cross-encoder (`cross-encoder/ms-marco-MiniLM-L-6-v2`, ~90MB, downloaded once)
-  before keeping the best 5. A cross-encoder reads the question and a candidate chunk *together*
-  and outputs one relevance score for that pair, which is slower than our embedding model (which
-  scores each independently) but much better at distinguishing rules with overlapping vocabulary -
-  e.g. HIPAA's administrative/physical/technical safeguards sections, which our baseline eval
-  showed getting confused for one another. Off by default; no behavior changes unless `--rerank`
-  (CLI) or `rerank=True` (code) is passed.
+  `ingest.py`); don't hand-edit it. **Switching embedding models requires a full re-ingest** -
+  vectors from different models aren't comparable, even at the same dimension.
+- `src/search.py` — a manual test tool for the retrieval step: embeds a typed question via Voyage
+  AI (`input_type="query"` - asymmetric from `ingest.py`'s `"document"` on purpose, matching how
+  Voyage's models are trained), queries Chroma for the top 5 matching chunks, and prints each
+  one's citation, law, a text snippet, and a similarity score (`1 - cosine distance`, exact given
+  the cosine-space collection above). Also exposes `get_collection()` and `query_rulebooks()`,
+  reused by `ask.py`, `audit.py`, and `eval/eval_retrieval.py` so every part of the project
+  searches the rulebooks the same way. `query_rulebooks(..., rerank=True)` adds an optional second
+  stage: instead of taking Chroma's top 5 directly, it fetches a larger pool
+  (`CANDIDATE_POOL_SIZE`, 20) and re-scores each candidate via Voyage AI's hosted re-ranker
+  (`rerank-2.5-lite`) before keeping the best 5. A re-ranker reads the question and a candidate
+  chunk *together* and outputs one relevance score for that pair, which is slower than embedding
+  search (a network call, vs. scoring each chunk independently) but much better at distinguishing
+  rules with overlapping vocabulary - e.g. HIPAA's administrative/physical/technical safeguards
+  sections, which our baseline eval showed getting confused for one another. Off by default; no
+  behavior changes unless `--rerank` (CLI) or `rerank=True` (code) is passed.
 - `src/ask.py` — the first full retrieval-plus-generation loop (the "R" and "G" of RAG): retrieves
   the top 5 matching rule chunks via `search.py`, then sends the question and those chunks to
   Claude (`claude-haiku-4-5`, loaded from `ANTHROPIC_API_KEY` in `.env` via `python-dotenv`) with a
@@ -201,8 +217,8 @@ No test suite exists yet.
   in both modes (plain embedding retrieval, and with `--rerank`-style cross-encoder re-ranking),
   checks whether the expected citation comes back in each, and prints a side-by-side Hit Rate @5 /
   MRR comparison plus a per-question table tagging each result FIXED BY RERANK / IMPROVED RANK /
-  WORSE RANK / BROKEN BY RERANK / SAME / STILL MISS. Purely local/free - no Claude API calls,
-  since it only tests the embedding + cross-encoder + Chroma retrieval step, not generation.
+  WORSE RANK / BROKEN BY RERANK / SAME / STILL MISS. No Claude API calls - it only tests the
+  Voyage embedding + re-ranking + Chroma retrieval step, not generation.
 - `eval/eval_verification.py` — runs the full verified audit (`audit_checkpoint()` +
   `verify_finding()` from `audit.py`, both reused directly) across every document in
   `data/documents_to_check/`, always with `rerank=True` retrieval. Collects every finding's

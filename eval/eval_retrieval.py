@@ -11,8 +11,10 @@ citation actually comes back, computing two standard retrieval metrics:
   ranked? 1.0 means it was always rank 1 (the very first result); 0.5 means
   it was typically rank 2; 0.0 means it was never found at all.
 
-Pure retrieval - no API calls, no cost, fully local (the re-ranker is a free
-local model too, downloaded once on first use)."""
+Pure retrieval, no Claude calls - but embedding and re-ranking are now hosted
+via Voyage AI (see src/voyage_client.py), not local models, so this does make
+network calls. Still free at this project's scale (well under Voyage's
+200M-token free tier)."""
 
 import json
 import sys
@@ -113,13 +115,13 @@ def main():
     gold_set = load_gold_set()
     print(f"Loaded {len(gold_set)} questions.\n")
 
-    print("Loading local embedding model and connecting to Chroma...")
+    print("Connecting to Chroma...")
     collection = get_collection()
 
     print(f"Running baseline retrieval (no re-ranking, top-{TOP_K})...")
     baseline = evaluate_gold_set(collection, gold_set, TOP_K, rerank=False)
 
-    print("Loading local cross-encoder re-ranker (downloads once, ~90MB) and running re-ranked retrieval...\n")
+    print("Running re-ranked retrieval via Voyage AI's hosted re-ranker...\n")
     reranked = evaluate_gold_set(collection, gold_set, TOP_K, rerank=True)
 
     print_comparison(baseline, reranked, TOP_K)
