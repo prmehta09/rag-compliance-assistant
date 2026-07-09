@@ -11,8 +11,10 @@ Run it with: venv\\Scripts\\uvicorn.exe api:app --reload
 """
 
 import json
+import re
 import sys
 from contextlib import asynccontextmanager
+from datetime import date
 from pathlib import Path
 
 from anthropic import Anthropic
@@ -117,6 +119,106 @@ def health():
 @app.get("/documents")
 def list_documents():
     return sorted(_available_documents())
+
+
+# The 9 filenames this project ships with - reserved so a pasted policy can
+# never overwrite (or silently shadow) one of the curated samples. This is a
+# fixed list, not "whatever's on disk right now": auto-suffixing (below) is
+# fine for paste-vs-paste name collisions, but a collision with one of these
+# specific files is always rejected outright, never worked around.
+BUNDLED_SAMPLE_DOCUMENTS = frozenset({
+    "github_privacy_policy.md",
+    "ebay_privacy_policy.md",
+    "mozilla_privacy_policy.md",
+    "teladoc_privacy_policy.md",
+    "amazon_privacy_policy.md",
+    "airbnb_privacy_policy.md",
+    "spotify_privacy_policy.md",
+    "linkedin_privacy_policy.md",
+    "netflix_privacy_policy.md",
+})
+
+MIN_PASTE_LENGTH = 200
+MAX_PASTE_LENGTH = 100_000  # comfortably under audit.py's 150K silent-truncation cap
+
+# A handful of structural tags that show up in real HTML but essentially
+# never in normal prose - used to reject accidental HTML pastes (e.g.
+# copy-pasting straight from a browser tab) rather than trying to strip them,
+# which risks mangling the exact wording an audit finding might cite.
+_HTML_STRUCTURAL_TAGS = re.compile(r"<(!doctype|html|head|body|div|table|script|style)\b", re.IGNORECASE)
+_GENERIC_TAG = re.compile(r"</?[a-zA-Z][\w-]*(?:\s[^<>]*)?>")
+
+
+def _looks_like_html(text: str) -> bool:
+    if _HTML_STRUCTURAL_TAGS.search(text):
+        return True
+    # A handful of stray "<" characters (e.g. "income < $50,000") is normal
+    # prose; a pile of tag-shaped substrings is not.
+    return len(_GENERIC_TAG.findall(text)) >= 5
+
+
+def _slugify(name: str) -> str:
+    """Collapses anything that isn't a-z/0-9 into a single underscore, so the
+    result can only ever contain [a-z0-9_] - no `/`, `\\`, or `..`, which
+    rules out path traversal regardless of what the user typed as a name."""
+    return re.sub(r"[^a-z0-9]+", "_", name.strip().lower()).strip("_")
+
+
+class CreateDocumentRequest(BaseModel):
+    name: str
+    text: str
+
+
+class CreateDocumentResponse(BaseModel):
+    filename: str
+    label: str
+
+
+@app.post("/documents", response_model=CreateDocumentResponse, status_code=201)
+def create_document(request: CreateDocumentRequest):
+    text = request.text.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Pasted text is empty.")
+    if len(text) < MIN_PASTE_LENGTH:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Pasted text is too short (minimum {MIN_PASTE_LENGTH} characters) to be a real policy.",
+        )
+    if len(text) > MAX_PASTE_LENGTH:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Pasted text is too long (maximum {MAX_PASTE_LENGTH:,} characters).",
+        )
+    if _looks_like_html(text):
+        raise HTTPException(
+            status_code=400,
+            detail="This looks like HTML, not plain text. Please paste the plain policy text only.",
+        )
+
+    label = request.name.strip()
+    slug = _slugify(label)
+    if not slug:
+        raise HTTPException(status_code=400, detail="Please provide a name for this policy.")
+
+    base_filename = f"{slug}_privacy_policy.md"
+    if base_filename in BUNDLED_SAMPLE_DOCUMENTS:
+        raise HTTPException(
+            status_code=409,
+            detail=f"'{label}' collides with a bundled sample document - please choose a different name.",
+        )
+
+    # Paste-vs-paste collisions (not a bundled sample - already excluded
+    # above) get auto-disambiguated instead of rejected.
+    filename = base_filename
+    suffix = 2
+    while (DOCUMENTS_DIR / filename).exists():
+        filename = f"{slug}_privacy_policy_{suffix}.md"
+        suffix += 1
+
+    content = f"# {label}\n\nSource: User-submitted (pasted {date.today().isoformat()})\n\n{text}\n"
+    (DOCUMENTS_DIR / filename).write_text(content, encoding="utf-8")
+
+    return CreateDocumentResponse(filename=filename, label=label)
 
 
 @app.post("/audit", response_model=AuditResponse)
