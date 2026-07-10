@@ -5,6 +5,10 @@ __pycache__/
 chroma_db/
 reports/
 
+# Local-only physical backup of landing/ before the frontend redesign -
+# never tracked, never committed.
+landing-v1-backup/
+
 # Data files can be large (datasets, cloned benchmarks, legal texts).
 # Ignore everything under data/ by default, but keep the folder structure
 # and README visible to anyone who clones the repo.
